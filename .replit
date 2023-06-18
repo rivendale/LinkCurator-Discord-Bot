@@ -1,0 +1,3 @@
+hidden = [".pythonlibs"]
+entrypoint = "main.py"
+modules = ["python-3.10:v5-20230613-622effa"]
