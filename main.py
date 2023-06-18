@@ -3,12 +3,15 @@ import re
 import os
 import requests
 from bs4 import BeautifulSoup
+import openai
 
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
 
 client = discord.Client(intents=intents)
+
+openai.api_key = os.getenv('OPENAI_API_KEY')  # Set your OpenAI API key
 
 def fetch_webpage(url):
     response = requests.get(url)
@@ -21,7 +24,12 @@ def get_webpage_summary(soup):
         return description_tag['content']
     return soup.title.string
 
+
+
+  
+  
 async def curate_links(message):
+    print(f"Message content: {message.content}")
     url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
     urls = re.findall(url_pattern, message.content)
 
@@ -37,7 +45,16 @@ async def curate_links(message):
             soup = fetch_webpage(url)
             summary = get_webpage_summary(soup)
 
-            channel_name = re.sub('[^0-9a-zA-Z]+', '-', summary)
+            # Use GPT-3 to categorize the webpage
+            response = openai.Completion.create(
+                engine="text-davinci-002",
+                prompt=summary,
+                temperature=0.5,
+                max_tokens=60
+            )
+            category_name = response.choices[0].text.strip()
+
+            channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
             channel = discord.utils.get(category.channels, name=channel_name)
             if channel is None:
                 await category.create_text_channel(channel_name)
@@ -48,12 +65,15 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+   # print(f"Message content: {message.content}")
+
     if message.author == client.user:
         return
 
     if message.content.startswith('!test'):
-        await message.channel.send('Test command received!')
-        return
+       print('Responding to !test command')
+       await message.channel.send('Test command received!')
+       return
 
     if message.content.startswith('!curate'):
         await message.channel.send('Curating...')
