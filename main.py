@@ -18,6 +18,17 @@ def fetch_webpage(url):
     soup = BeautifulSoup(response.text, 'html.parser')
     return soup
 
+
+def get_twitter_metadata(url):
+    oembed_url = f"https://publish.twitter.com/oembed?url={url}"
+    response = requests.get(oembed_url)
+    if response.status_code == 200:
+        metadata = response.json()
+        return metadata
+    else:
+        return None
+
+
 def get_webpage_summary(soup):
     ogp_description = soup.find('meta', attrs={'property': 'og:description'})
     if ogp_description:
@@ -29,11 +40,11 @@ def get_webpage_summary(soup):
 
     return soup.title.string if soup.title else None
 
-async def remove_duplicates(message):
+async def remove_duplicates(message, limit=None):
     try:
         channel = message.channel
         messages = []
-        async for msg in channel.history():
+        async for msg in channel.history(limit=limit):
             messages.append(msg)
         seen = set()
         url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
@@ -48,7 +59,45 @@ async def remove_duplicates(message):
         print(f"Error in remove_duplicates: {e}")
         await message.channel.send(f'Error occurred in remove_duplicates: {e}')
 
-async def curate_links(message):
+async def wipeclean(guild):
+    try:
+        category_names = ["CURATED LINKS", "CURATED ARTICLES"]
+        for category in guild.categories:
+            if any(category.name.startswith(name) for name in category_names):
+                for channel in category.channels:
+                    if isinstance(channel, discord.TextChannel):
+                        await channel.delete()
+
+    except Exception as e:
+        print(f"Error in wipeclean: {e}")
+
+
+
+async def consolidate_channels(guild):
+    try:
+        category_channels = {}
+        for category in guild.categories:
+            if category.name.startswith("CURATED"):
+                for channel in category.channels:
+                    if isinstance(channel, discord.TextChannel):
+                        group_name = channel.name
+                        if group_name not in category_channels:
+                            category_channels[group_name] = []
+                        category_channels[group_name].append(channel)
+
+        for group_name, channels in category_channels.items():
+            if len(channels) > 1:
+                consolidate_channel = channels[0]
+                for channel in channels[1:]:
+                    async for message in channel.history(limit=None):
+                        await consolidate_channel.send(message.content)
+                    await channel.delete()
+
+    except Exception as e:
+        print(f"Error in consolidate_channels: {e}")
+
+
+async def curate_links(message, limit=None):
     try:
         url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
         urls = re.findall(url_pattern, message.content)
@@ -62,40 +111,54 @@ async def curate_links(message):
                 category = await message.guild.create_category(category_name)
 
             for url in urls:
-                soup = fetch_webpage(url)
-                if soup is None:
-                    summary = f"Could not fetch summary for {url}"
+                if "twitter.com/" in url:
+                    metadata = get_twitter_metadata(url)
+                    if metadata:
+                        content = f"Link: {url}\nTweet: {metadata['html']}"
+                        cleaned_content = re.sub('[^\w\s.-:\/]', '', content).strip()
+                        if cleaned_content:
+                            channel_name = re.sub('[^0-9a-zA-Z]+', '-', cleaned_content)
+                            channel = discord.utils.get(category.channels, name=channel_name)
+                            if channel is None:
+                                channel = await category.create_text_channel(channel_name)
+                            await channel.send(cleaned_content)
                 else:
-                    summary = get_webpage_summary(soup)
+                    soup = fetch_webpage(url)
+                    if soup is None:
+                        summary = f"Could not fetch summary for {url}"
+                    else:
+                        summary = get_webpage_summary(soup)
 
-                response = openai.Completion.create(
-                    engine="text-davinci-002",
-                    prompt=f"Given the summary: '{summary}', provide a concise and general category or subject name:",
-                    temperature=0.3,
-                    max_tokens=20
-                )
-                print(response.choices[0])
-                category_name = response.choices[0].text.strip()
+                    response = openai.Completion.create(
+                        engine="text-davinci-002",
+                        prompt=f"Given the summary: '{summary}', provide a concise and general category or subject name:",
+                        temperature=0.3,
+                        max_tokens=20
+                    )
+                    print(response.choices[0])
+                    category_name = response.choices[0].text.strip()
 
-                channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
-                if len(channel_name) == 0:
-                    channel_name = "default"
-                elif len(channel_name) > 70:
-                    channel_name = channel_name[:70]
-                print(f"GPT-3 generated category name: {category_name}")
+                    channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
+                    if len(channel_name) == 0:
+                        channel_name = "default"
+                    elif len(channel_name) > 70:
+                        channel_name = channel_name[:70]
+                    print(f"GPT-3 generated category name: {category_name}")
 
-                channel = discord.utils.get(category.channels, name=channel_name)
-                if channel is None:
-                    channel = await category.create_text_channel(channel_name)
+                    channel = discord.utils.get(category.channels, name=channel_name)
+                    if channel is None:
+                        channel = await category.create_text_channel(channel_name)
 
-                content = f"Link: {url}\nSummary: {summary}"
-                cleaned_content = re.sub('[^\w\s.-:\/]', '', content).strip()
-                if cleaned_content:
-                    await channel.send(cleaned_content)
+                    content = f"Link: {url}\nSummary: {summary}"
+                    cleaned_content = re.sub('[^\w\s.-:\/]', '', content).strip()
+                    if cleaned_content:
+                        await channel.send(cleaned_content)
 
     except Exception as e:
         print(f"Error in curate_links: {e}")
         await message.channel.send(f'Error occurred in curate_links: {e}')
+
+
 
 async def consolidate_channels(guild):
     try:
@@ -133,15 +196,17 @@ async def on_message(message):
         return
 
     if message.content.startswith('!test'):
-        print('Responding to !test command')
-        await message.channel.send('Test command received!')
+        try:
+            await message.channel.send('Test command received!')
+        except discord.Forbidden:
+            await message.channel.send('Error: Bot does not have access in this channel.')
         return
 
     if message.content.startswith('!curate'):
         await message.channel.send('Curating...')
         try:
             async for old_message in message.channel.history(limit=None):
-                await curate_links(old_message)
+                await curate_links(old_message, limit=99)  # Paginate with a limit of 100 messages per call
         except Exception as e:
             await message.channel.send(f'Error occurred: {e}')
             return
@@ -151,35 +216,51 @@ async def on_message(message):
     if message.content.startswith('!removedupes'):
         await message.channel.send('Removing duplicates...')
         try:
-            await remove_duplicates(message)
+            await remove_duplicates(message, limit=None)  # No pagination for removing duplicates
         except Exception as e:
             await message.channel.send(f'Error occurred: {e}')
             return
         await message.channel.send('Duplicates removed.')
         return
-
-    if message.content.startswith('!removetext'):
-        await message.channel.send('Removing non-article or non-link text...')
-        try:
-            async for old_message in message.channel.history(limit=None):
-                await remove_non_article_links(old_message)
-        except Exception as e:
-            await message.channel.send(f'Error occurred: {e}')
-            return
-        await message.channel.send('Non-article or non-link text removed.')
-        return
+  
+  
+    if message.content.startswith('!wipeclean'):
+      await message.channel.send('Performing wipe clean...')
+      try:
+          await wipeclean(message.guild)
+      except Exception as e:
+          await message.channel.send(f'Error occurred: {e}')
+          return
+      await message.channel.send('Wipe clean completed.')
+      return
 
     if message.content.startswith('!organize'):
         await message.channel.send('Organizing channels...')
         try:
             await consolidate_channels(message.guild)
+            await remove_duplicates(message, limit=None)  # Remove duplicates after consolidation
         except Exception as e:
             await message.channel.send(f'Error occurred: {e}')
             return
         await message.channel.send('Channel organization completed.')
         return
 
-    await curate_links(message)
+
+    if message.content.startswith('!removetext'):
+        await message.channel.send('Removing non-article or non-link text...')
+        try:
+            async for old_message in message.channel.history(limit=None):
+                await remove_duplicates(old_message, limit=99)  # Paginate with a limit of 100 messages per call
+        except Exception as e:
+            await message.channel.send(f'Error occurred: {e}')
+            return
+        await message.channel.send('Non-article or non-link text removed.')
+        return
+      
+    except KeyboardInterrupt:
+        print("Keyboard interrupt detected. Stopping the bot...")
+        await client.close()
+
 
 
 client.run(os.getenv('LINKCURATOR_TOKEN'))
