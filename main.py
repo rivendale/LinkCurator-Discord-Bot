@@ -8,7 +8,7 @@ import openai
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
-
+intents.message_content = True  # explicitly enable the message content intents
 client = discord.Client(intents=intents)
 
 openai.api_key = os.getenv('OPENAI_API_KEY')  # Set your OpenAI API key
@@ -24,40 +24,51 @@ def get_webpage_summary(soup):
         return description_tag['content']
     return soup.title.string
 
-
-
-  
   
 async def curate_links(message):
-    print(f"Message content: {message.content}")
-    url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
-    urls = re.findall(url_pattern, message.content)
+    try:
+        url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
+        urls = re.findall(url_pattern, message.content)
 
-    if urls:
-        print(f"Found URLs in message: {urls}")
-        
-        category_name = "Curated Links"
-        category = discord.utils.get(message.guild.categories, name=category_name)
-        if category is None:
-            category = await message.guild.create_category(category_name)
+        if urls:
+            print(f"Found URLs in message: {urls}")
+            
+            category_name = "Curated Links"
+            category = discord.utils.get(message.guild.categories, name=category_name)
+            if category is None:
+                category = await message.guild.create_category(category_name)
 
-        for url in urls:
-            soup = fetch_webpage(url)
-            summary = get_webpage_summary(soup)
+            for url in urls:
+                soup = fetch_webpage(url)
+                summary = get_webpage_summary(soup)
 
-            # Use GPT-3 to categorize the webpage
-            response = openai.Completion.create(
-                engine="text-davinci-002",
-                prompt=summary,
-                temperature=0.5,
-                max_tokens=60
-            )
-            category_name = response.choices[0].text.strip()
+                # Use GPT-3 to categorize the webpage
+                response = openai.Completion.create(
+                    engine="text-davinci-002",
+                    prompt=f"{summary}\n\nThis content belongs to which general category or subject:",
+                    temperature=0.5,
+                    max_tokens=60
+                )
+                category_name = response.choices[0].text.strip()
 
-            channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
-            channel = discord.utils.get(category.channels, name=channel_name)
-            if channel is None:
-                await category.create_text_channel(channel_name)
+                # Sanitize the generated name
+                channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
+                # Ensure the name is within the valid length range
+                if len(channel_name) == 0:
+                    channel_name = "default"
+                elif len(channel_name) > 100:
+                    channel_name = channel_name[:100]
+                print(f"GPT-3 generated category name: {category_name}")
+
+                channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
+                channel = discord.utils.get(category.channels, name=channel_name)
+                if channel is None:
+                    channel = await category.create_text_channel(channel_name)
+                await channel.send(f"Link: {url}\nSummary: {summary}")
+    except Exception as e:
+        print(f"Error in curate_links: {e}")
+        await message.channel.send(f'Error occurred in curate_links: {e}')
+
 
 @client.event
 async def on_ready():
@@ -65,10 +76,21 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-   # print(f"Message content: {message.content}")
+    print(f"Message content: {message.content}")
 
     if message.author == client.user:
         return
+
+    if message.type != discord.MessageType.default:
+        print("Ignoring system message")
+        return
+
+    if message.edited_at is not None:
+        print("Ignoring edited message")
+        return
+
+    print(f"Message embeds: {message.embeds}")
+    print(f"Message attachments: {message.attachments}")
 
     if message.content.startswith('!test'):
        print('Responding to !test command')
@@ -87,6 +109,7 @@ async def on_message(message):
         return
 
     await curate_links(message)
+
 
 
 client.run(os.getenv('LINKCURATOR_TOKEN'))
