@@ -8,7 +8,7 @@ import openai
 intents = discord.Intents.default()
 intents.messages = True
 intents.guilds = True
-intents.message_content = True  # explicitly enable the message content intents
+intents.message_content = True
 client = discord.Client(intents=intents)
 
 openai.api_key = os.getenv('OPENAI_API_KEY')  # Set your OpenAI API key
@@ -19,22 +19,19 @@ def fetch_webpage(url):
     return soup
 
 def get_webpage_summary(soup):
+    ogp_description = soup.find('meta', attrs={'property': 'og:description'})
+    if ogp_description:
+        return ogp_description['content']
+
     description_tag = soup.find('meta', attrs={'name': 'description'})
     if description_tag:
         return description_tag['content']
-    return soup.title.string
 
-def fetch_webpage(url):
-    response = requests.get(url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    if "Attention Required!" in soup.text:
-        print(f"Cloudflare block encountered at {url}")
-        return None
-    return soup
+    return soup.title.string if soup.title else None
 
 async def remove_duplicates(message):
     try:
-        channel = message.channel  # Get the channel where the command was issued
+        channel = message.channel
         messages = []
         async for msg in channel.history():
             messages.append(msg)
@@ -44,17 +41,12 @@ async def remove_duplicates(message):
             urls = re.findall(url_pattern, msg.content)
             for url in urls:
                 if url in seen:
-                    await msg.delete()  # Delete the message
+                    await msg.delete()
                 else:
                     seen.add(url)
     except Exception as e:
         print(f"Error in remove_duplicates: {e}")
         await message.channel.send(f'Error occurred in remove_duplicates: {e}')
-
-
-
-
-
 
 async def curate_links(message):
     try:
@@ -63,8 +55,8 @@ async def curate_links(message):
 
         if urls:
             print(f"Found URLs in message: {urls}")
-            
-            category_name = "Curated Articles"
+
+            category_name = "CURATED LINKS"
             category = discord.utils.get(message.guild.categories, name=category_name)
             if category is None:
                 category = await message.guild.create_category(category_name)
@@ -75,9 +67,7 @@ async def curate_links(message):
                     summary = f"Could not fetch summary for {url}"
                 else:
                     summary = get_webpage_summary(soup)
-                summary = get_webpage_summary(soup)
 
-                # Use GPT-3 to categorize the webpage
                 response = openai.Completion.create(
                     engine="text-davinci-002",
                     prompt=f"Given the summary: '{summary}', provide a concise and general category or subject name:",
@@ -87,9 +77,7 @@ async def curate_links(message):
                 print(response.choices[0])
                 category_name = response.choices[0].text.strip()
 
-                # Sanitize the generated name
                 channel_name = re.sub('[^0-9a-zA-Z]+', '-', category_name)
-                # Ensure the name is within the valid length range
                 if len(channel_name) == 0:
                     channel_name = "default"
                 elif len(channel_name) > 70:
@@ -99,11 +87,31 @@ async def curate_links(message):
                 channel = discord.utils.get(category.channels, name=channel_name)
                 if channel is None:
                     channel = await category.create_text_channel(channel_name)
-                await channel.send(f"Link: {url}\nSummary: {summary}")
+
+                content = f"Link: {url}\nSummary: {summary}"
+                cleaned_content = re.sub('[^\w\s.-:\/]', '', content).strip()
+                if cleaned_content:
+                    await channel.send(cleaned_content)
+
     except Exception as e:
         print(f"Error in curate_links: {e}")
         await message.channel.send(f'Error occurred in curate_links: {e}')
 
+async def consolidate_channels(guild):
+    try:
+        channels = [channel for channel in guild.channels if isinstance(channel, discord.TextChannel)]
+        channel_names = set(channel.name for channel in channels)
+        for name in channel_names:
+            same_name_channels = [channel for channel in channels if channel.name == name]
+            if len(same_name_channels) > 1:
+                consolidate_channel = same_name_channels[0]
+                for channel in same_name_channels[1:]:
+                    async for message in channel.history(limit=None):
+                        await consolidate_channel.send(message.content)
+                    await channel.delete()
+
+    except Exception as e:
+        print(f"Error in consolidate_channels: {e}")
 
 @client.event
 async def on_ready():
@@ -123,12 +131,12 @@ async def on_message(message):
     if message.edited_at is not None:
         print("Ignoring edited message")
         return
-  
+
     if message.content.startswith('!test'):
-       print('Responding to !test command')
-       await message.channel.send('Test command received!')
-       return
-  
+        print('Responding to !test command')
+        await message.channel.send('Test command received!')
+        return
+
     if message.content.startswith('!curate'):
         await message.channel.send('Curating...')
         try:
@@ -140,7 +148,6 @@ async def on_message(message):
         await message.channel.send('Curating completed.')
         return
 
-
     if message.content.startswith('!removedupes'):
         await message.channel.send('Removing duplicates...')
         try:
@@ -150,10 +157,29 @@ async def on_message(message):
             return
         await message.channel.send('Duplicates removed.')
         return
-  
+
+    if message.content.startswith('!removetext'):
+        await message.channel.send('Removing non-article or non-link text...')
+        try:
+            async for old_message in message.channel.history(limit=None):
+                await remove_non_article_links(old_message)
+        except Exception as e:
+            await message.channel.send(f'Error occurred: {e}')
+            return
+        await message.channel.send('Non-article or non-link text removed.')
+        return
+
+    if message.content.startswith('!organize'):
+        await message.channel.send('Organizing channels...')
+        try:
+            await consolidate_channels(message.guild)
+        except Exception as e:
+            await message.channel.send(f'Error occurred: {e}')
+            return
+        await message.channel.send('Channel organization completed.')
+        return
 
     await curate_links(message)
-
 
 
 client.run(os.getenv('LINKCURATOR_TOKEN'))
