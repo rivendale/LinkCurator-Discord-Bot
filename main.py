@@ -11,7 +11,7 @@ intents.guilds = True
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-openai.api_key = os.getenv('OPENAI_API_KEY')  # Set your OpenAI API key
+openai.api_key = os.getenv('OPENAI_API_KEY') 
 
 def fetch_webpage(url):
     response = requests.get(url)
@@ -195,6 +195,51 @@ async def on_message(message):
         print("Ignoring edited message")
         return
 
+    if message.content.startswith('!organize'):
+        await message.channel.send('Organizing channels...')
+        try:
+            organized_category = discord.utils.get(message.guild.categories, name="ORGANIZED")
+            if organized_category is None:
+                organized_category = await message.guild.create_category("ORGANIZED")
+
+            channels = [channel for channel in message.guild.channels if isinstance(channel, discord.TextChannel)]
+            channel_names = set(channel.name for channel in channels)
+
+            for name in channel_names:
+                same_name_channels = [channel for channel in channels if channel.name == name]
+
+                if len(same_name_channels) > 1:
+                    organized_channel = discord.utils.get(organized_category.channels, name=name)
+                    if organized_channel is None:
+                        organized_channel = await organized_category.create_text_channel(name)
+
+                    for channel in same_name_channels:
+                        # Paginate with a limit of 100 messages per call
+                        async for message in channel.history(limit=100):
+                            await organized_channel.send(message.content)
+                        await channel.delete()
+
+        except Exception as e:
+            await message.channel.send(f'Error occurred: {e}')
+            return
+        await message.channel.send('Channel organization completed.')
+        return
+  
+
+    if message.content.startswith('!cleanup'):
+        await message.channel.send('Performing cleanup...')
+        try:
+            for category in message.guild.categories:
+                if category.name.startswith("CURATED"):
+                    for channel in category.channels:
+                        await channel.delete()
+                    await category.delete()
+        except Exception as e:
+            await message.channel.send(f'Error occurred: {e}')
+            return
+        await message.channel.send('Cleanup completed.')
+        return
+
     if message.content.startswith('!test'):
         try:
             await message.channel.send('Test command received!')
@@ -222,29 +267,6 @@ async def on_message(message):
             return
         await message.channel.send('Duplicates removed.')
         return
-  
-  
-    if message.content.startswith('!wipeclean'):
-      await message.channel.send('Performing wipe clean...')
-      try:
-          await wipeclean(message.guild)
-      except Exception as e:
-          await message.channel.send(f'Error occurred: {e}')
-          return
-      await message.channel.send('Wipe clean completed.')
-      return
-
-    if message.content.startswith('!organize'):
-        await message.channel.send('Organizing channels...')
-        try:
-            await consolidate_channels(message.guild)
-            await remove_duplicates(message, limit=None)  # Remove duplicates after consolidation
-        except Exception as e:
-            await message.channel.send(f'Error occurred: {e}')
-            return
-        await message.channel.send('Channel organization completed.')
-        return
-
 
     if message.content.startswith('!removetext'):
         await message.channel.send('Removing non-article or non-link text...')
@@ -256,11 +278,16 @@ async def on_message(message):
             return
         await message.channel.send('Non-article or non-link text removed.')
         return
+
+
+
       
-    except KeyboardInterrupt:
-        print("Keyboard interrupt detected. Stopping the bot...")
-        await client.close()
+    
+try:
+    client.run(os.getenv('LINKCURATOR_TOKEN'))
+except KeyboardInterrupt:
+    print("Keyboard interrupt detected. Stopping the bot...")
+    client.close() 
 
 
 
-client.run(os.getenv('LINKCURATOR_TOKEN'))
