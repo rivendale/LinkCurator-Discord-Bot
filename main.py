@@ -249,6 +249,40 @@ async def organize(ctx):
     await ctx.send("Organize completed!")
 
 
+@client.command(name='removedupes')
+@commands.cooldown(1, 10, commands.BucketType.guild)
+async def removedupes(ctx):
+    await ctx.send("Removing duplicate links...")
+
+    # Fetch the current channel
+    channel = ctx.channel
+
+    # Fetch messages in the channel with pagination
+    messages = []
+    async for message in channel.history(limit=None):
+        messages.append(message)
+        if len(messages) >= 100:  # Adjust the batch size as needed
+            break
+
+    # Track encountered links
+    encountered_links = set()
+
+    # Iterate through messages in reverse order
+    for message in reversed(messages):
+        # Check if the message contains a link
+        if message.content.startswith('http'):
+            link = message.content.strip()
+            # Check if the link has been encountered before
+            if link in encountered_links:
+                # Delete the message
+                await message.delete()
+            else:
+                encountered_links.add(link)
+
+        # Rate limit to avoid hitting Discord's API rate limits
+        await asyncio.sleep(2)  # Adjust the sleep duration as needed
+
+    await ctx.send("Duplicate links removed!")
 
 
 
@@ -259,17 +293,34 @@ async def removetext(ctx):
     # Fetch the current channel
     channel = ctx.channel
 
-    # Fetch all messages in the channel
-    messages = await channel.history(limit=None).flatten()
+    # Initialize variables
+    messages = []
+    before_message = None
 
-    # Filter and delete text messages
+    # Fetch messages in chunks with rate limit handling
+    async for message in channel.history(limit=None, before=before_message):
+        messages.append(message)
+        before_message = message.created_at
+
+        # Rate limit handling
+        if len(messages) >= 100:
+            for message in messages:
+                if message.content and not message.embeds:
+                    await message.delete()
+                    await asyncio.sleep(2)  # Add a 2-second delay
+
+            messages = []  # Clear the list
+
+    # Delete any remaining messages
     for message in messages:
         if message.content and not message.embeds:
-            # Check if the message does not contain any links
-            if not any(url in message.content for url in message.content.split()):
-                await message.delete()
+            await message.delete()
+            await asyncio.sleep(2)  # Add a 2-second delay
 
     await ctx.send("Text messages removed!")
+
+
+
 
 
 
