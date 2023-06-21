@@ -97,6 +97,16 @@ async def consolidate_channels(guild):
         print(f"Error in consolidate_channels: {e}")
 
 
+async def safe_send(channel, content):
+    if len(content) <= 2000:
+        await channel.send(content)
+    else:
+        for chunk in [content[i:i+2000] for i in range(0, len(content), 2000)]:
+            await channel.send(chunk)
+
+
+
+
 async def curate_links(message, limit=None):
     try:
         url_pattern = re.compile('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+')
@@ -214,10 +224,18 @@ async def on_message(message):
                         organized_channel = await organized_category.create_text_channel(name)
 
                     for channel in same_name_channels:
-                        # Paginate with a limit of 100 messages per call
-                        async for message in channel.history(limit=100):
-                            await organized_channel.send(message.content)
-                        await channel.delete()
+                        try:
+                            # Paginate with a limit of 100 messages per call
+                            async for old_message in channel.history(limit=100):
+                                if old_message.content.strip():  # Skip empty or whitespace-only messages
+                                    await organized_channel.send(old_message.content)
+                            # Ensure that the channel isn't under the "ORGANIZED" category before deleting
+                            if channel.category != organized_category:
+                                await channel.delete()
+
+                        except discord.Forbidden:
+                            print(f"Bot does not have access to the channel: {channel.name}")
+                            continue
 
         except Exception as e:
             await message.channel.send(f'Error occurred: {e}')
