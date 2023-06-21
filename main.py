@@ -10,6 +10,14 @@ import aiohttp
 import urllib.parse
 import time
 import re
+from enum import Enum
+
+class ProcessLinkResult(Enum):
+    ADDED = 1
+    ALREADY_EXISTS = 2
+    THREAD_EXISTS = 3
+    PERMISSION_ERROR = 4
+
 
 # Define the intents
 intents = discord.Intents.default()
@@ -138,7 +146,7 @@ def extract_keywords_from_text(text):
     return keywords[:3]  
 
 
-async def process_link(message):
+async def process_link(message, category):
     # Fetch webpage
     webpage_content, metadata = await fetch_webpage(message.content)
 
@@ -151,35 +159,25 @@ async def process_link(message):
         metadata_text = format_metadata(metadata)
         # Summarize the article with GPT-3.5
         summary = summarize_with_gpt3(soup.get_text())
-        # Check if 'CURATED' category exists
-        category = discord.utils.get(message.guild.categories, name='CURATED')
-        if not category:
-            category = await message.guild.create_category('CURATED')
 
-        # Check if 'LINKS' channel exists under 'CURATED' category
         links_channel = discord.utils.get(category.channels, name='links')
-        if not links_channel:
-            links_channel = await category.create_text_channel('links')
-
-        existing_threads = [thread for thread in links_channel.threads if thread.name == link_title]
-        if not existing_threads:
-            existing_links = [link async for link in links_channel.history() if link.author == client.user and link.content.startswith(link_title)]
-            if not existing_links:
-                thread_name = link_title
-                thread = await links_channel.create_thread(name=thread_name, auto_archive_duration=60)
-                # Send the summary and metadata to the thread
-                await thread.send(f"{link_title} - {summary}\n{metadata_text}")
-                await message.channel.send(f"Added: {link_title} - {summary}\n{metadata_text}")
-                await discord.utils.sleep_until(message.created_at + timedelta(seconds=1))  # Pause for 1 second
-                return ProcessLinkResult.ADDED
+        if links_channel:
+            existing_threads = [thread for thread in links_channel.threads if thread.name == link_title]
+            if not existing_threads:
+                existing_links = [link async for link in links_channel.history() if link.author == client.user and link.content.startswith(link_title)]
+                await asyncio.sleep(1)  # Delay to respect rate limits
+                if not existing_links:
+                    thread_name = link_title
+                    thread = await links_channel.create_thread(name=thread_name, auto_archive_duration=60)
+                    # Send the summary and metadata to the thread
+                    await thread.send(f"{link_title} - {summary}\n{metadata_text}")
+                    await message.channel.send(f"Added: {link_title} - {summary}\n{metadata_text}")
+                else:
+                    await message.channel.send(f"Link already exists: {link_title}")
             else:
-                await message.channel.send(f"Link already exists: {link_title}")
-                return ProcessLinkResult.ALREADY_EXISTS
-        else:
-            await message.channel.send(f"Thread already exists: {link_title}")
-            return ProcessLinkResult.THREAD_EXISTS
+                await message.channel.send(f"Thread already exists: {link_title}")
 
-    return ProcessLinkResult.FAILURE
+
 
 
 
@@ -206,29 +204,33 @@ client.on_command_error = on_command_error
 async def on_message(message):
     if message.content.startswith('http'):
         await message.channel.send("Fetching link info...")
-        
-        result = await process_link(message)
-        
-        if result == ProcessLinkResult.ADDED:
-            await message.channel.send("Link added successfully!")
-        elif result == ProcessLinkResult.ALREADY_EXISTS:
-            await message.channel.send("The link already exists.")
-        elif result == ProcessLinkResult.THREAD_EXISTS:
-            await message.channel.send("A thread for the link already exists.")
-        elif result == ProcessLinkResult.PERMISSION_ERROR:
-            await message.channel.send("I don't have the necessary permissions to organize links.")
+
+        category = discord.utils.get(message.guild.categories, name='CURATED')
+        if category:
+            await process_link(message, category)
+        else:
+            await message.channel.send("The 'CURATED' category does not exist.")
+
     # Process commands
     await client.process_commands(message)
+
+
 
 
 @client.command(name='organize')
 @commands.has_any_role('Admin', 'Manager')
 async def organize(ctx):
     await ctx.send("Organize command received! Processing...")
+
     for category in ctx.guild.categories:
+        if category.name == 'CURATED':
+            continue
+
         if not category.permissions_for(ctx.guild.me).manage_channels:
             await ctx.send(f"I don't have the required permissions to manage channels in the category '{category.name}'. Skipping...")
             continue
+
+        await ctx.send(f"Processing category '{category.name}'...")
 
         for channel in category.channels:
             if isinstance(channel, discord.TextChannel):
@@ -236,12 +238,40 @@ async def organize(ctx):
                     await ctx.send(f"I don't have the required permissions to manage messages in the channel '{channel.name}'. Skipping...")
                     continue
 
+                await ctx.send(f"Processing channel '{channel.name}'...")
+
                 before_message = None  # Initialize the before_message variable
                 async for message in channel.history(limit=None, before=before_message):
-                    if message.author == client.user and message.content.startswith('http'):
-                        await process_link(message)
-    
+                    if message.content.startswith('http'):
+                        await process_link(message, category)
+                        await ctx.send(f"Processed link: {message.content}")
+
     await ctx.send("Organize completed!")
+
+
+
+
+
+@client.command(name='removetext')
+async def removetext(ctx):
+    await ctx.send("Removing text messages...")
+
+    # Fetch the current channel
+    channel = ctx.channel
+
+    # Fetch all messages in the channel
+    messages = await channel.history(limit=None).flatten()
+
+    # Filter and delete text messages
+    for message in messages:
+        if message.content and not message.embeds:
+            # Check if the message does not contain any links
+            if not any(url in message.content for url in message.content.split()):
+                await message.delete()
+
+    await ctx.send("Text messages removed!")
+
+
 
 
 # Test command
