@@ -106,7 +106,6 @@ async def on_message(message):
 #            await asyncio.sleep(2)  # to respect rate limits
 #    await ctx.send("Cleanup completed!")
 
-#Organize command
 @client.command(name='organize')
 @commands.has_any_role('Admin', 'Manager')
 async def organize(ctx):
@@ -129,17 +128,31 @@ async def organize(ctx):
                 message_count = 0
                 async for old_message in channel.history(limit=None):
                     if old_message.content.strip():
-                        await organized_channel.send(old_message.content)
-                    message_count += 1
-                    if message_count % 100 == 0:
-                        print(f"Processed {message_count} messages...")
+                        content = old_message.content
+                        while len(content) > 0:
+                            chunk = content[:2000]
+                            await organized_channel.send(chunk)
+                            content = content[2000:]
+                        message_count += 1
+                        if message_count % 100 == 0:
+                            print(f"Processed {message_count} messages...")
 
-                if channel.category != organized_category:
-                    await channel.delete()
+                if channel.category != organized_category and not channel.is_news():
+                    try:
+                        await channel.delete()
+                    except discord.errors.HTTPException as e:
+                        if e.status == 400 and e.code == 50074:
+                            print(f"Skipping deletion of required channel: {channel.name}")
+                        else:
+                            raise
 
                 await asyncio.sleep(2)  # to respect rate limits
 
     await ctx.send("Organize completed!")
+
+
+
+
 
 
 # Test command
