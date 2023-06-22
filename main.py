@@ -11,6 +11,7 @@ import urllib.parse
 import time
 import re
 from enum import Enum
+import requests 
 
 class ProcessLinkResult(Enum):
     ADDED = 1
@@ -37,6 +38,16 @@ if bot_token is None:
     print("Error: LINKCURATOR_TOKEN environment variable not set.")
     sys.exit(1)
 
+twitter_bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+if twitter_bearer_token is None:
+    print("Error: TWITTER_BEARER_TOKEN environment variable not set.")
+    sys.exit(1)
+else:
+  consumer_key = os.getenv('TWITTER_API_KEY')
+  consumer_secret = os.getenv('TWITTER_API_KEY_SECRET')
+  access_token = os.getenv('TWITTER_ACCESS_TOKEN')
+  access_token_secret = os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
+
 
 def is_valid_url(url):
     regex = re.compile(
@@ -59,13 +70,6 @@ def format_metadata(metadata):
     for key, value in metadata.items():
         metadata_text += f"{key}: {value}\n"
     return metadata_text
-
-def identify_thread(summary, organized_category):
-    existing_channel_names = [channel.name for channel in organized_category.channels]
-    max_context_length = 3997  # Adjust this value based on the model's maximum context length
-    prompt_length = max_context_length - len(summary) - len(existing_channel_names) - 100
-    prompt = f"Based on the summary: {summary[:prompt_length]}, return a channel name that fits the broad topic without any additional text:\nExisting channels to match if close or else create new broad channel: {existing_channel_names} "
-
     response = openai.Completion.create(
         engine="text-davinci-003",
         prompt=prompt,
@@ -74,6 +78,18 @@ def identify_thread(summary, organized_category):
     channel_name = response.choices[0].text.strip()
     return channel_name
 
+def extract_ogp_metadata(html_content):
+    soup = BeautifulSoup(html_content, 'html.parser')
+    # Extract OGP metadata tags
+    ogp_metadata = {}
+    ogp_tags = soup.find_all('meta', attrs={'property': lambda p: p.startswith('og:')})
+    for tag in ogp_tags:
+        property_name = tag['property'][3:]  # Remove the 'og:' prefix
+        content = tag.get('content')
+        if property_name and content:
+            ogp_metadata[property_name] = content
+    return ogp_metadata
+  
 
 async def fetch_webpage(url):
     try:
@@ -86,15 +102,67 @@ async def fetch_webpage(url):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(encoded_url) as response:
                 if response.status == 200:
-                    webpage_content = await response.text()
-                    metadata = response.headers  # Pass the response headers as metadata
-                    return webpage_content, metadata
+                    if "twitter.com" in response.url.host:  # Check if the URL is from Twitter
+                        # Fetch card metadata from Twitter
+                        webpage_content = await response.text()
+                        card_metadata = await fetch_twitter_card_metadata(url)
+                        return webpage_content, card_metadata
+                    else:
+                        webpage_content = await response.text()
+                        metadata = response.headers  # Pass the response headers as metadata
+                        return webpage_content, metadata
                 else:
                     print(f"Failed to fetch webpage: {response.status} {response.reason}")
                     return None, None
     except ValueError:
         print("Invalid URL:", url)
         return None, None
+
+
+async def fetch_twitter_card_metadata(url):
+    try:
+        bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+        print("Starting fetch_twitter_card_metadata_v2 for URL:", url)
+        if bearer_token is None:
+            print("Twitter bearer token not found in environment variables.")
+            return {}
+
+        if not isinstance(url, str):
+            print("URL must be a string.")
+            return {}
+
+        tweet_id = re.search(r'/status/(\d+)', url)
+        if tweet_id is None:
+            print("Invalid tweet URL.")
+            return {}
+        tweet_id = tweet_id.group(1)
+        print("Extracted tweet ID:", tweet_id)
+
+        headers = {"Authorization": f"Bearer {bearer_token}", "User-Agent": "v2FullArchiveSearchPython"}
+        print("Sending request to Twitter API...")
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"https://api.twitter.com/2/tweets/{tweet_id}", headers=headers) as response:
+                print("Received response from Twitter API.")
+                tweet = await response.json()
+
+        if 'data' in tweet:
+            tweet = tweet['data']
+            card_metadata = {
+                "title": tweet.get("text", ""),
+                "creator": tweet.get("author_id", ""),
+            }
+            print("Extracted card metadata:", card_metadata)
+            return card_metadata
+        else:
+            print("No data in response from Twitter API.")
+            return {}
+    except Exception as e:
+        print("Failed to fetch Twitter card metadata:", str(e))
+        return {}
+
+
+
 
 def summarize_with_gpt3(text):
     max_context_length = 7000
@@ -154,6 +222,11 @@ async def process_link(message):
         soup = BeautifulSoup(webpage_content, 'html.parser')
         # Get the webpage title
         link_title = soup.title.string if soup.title else message.content
+        if not link_title:
+            link_title = "Untitled"  # Set a default title if it's empty
+        if len(link_title) > 100:
+            link_title = link_title[:100]  # Truncate the title if it exceeds 100 characters
+
         # Extract metadata
         metadata = extract_metadata(message.content, webpage_content)
         metadata_text = format_metadata(metadata)
@@ -183,8 +256,6 @@ async def process_link(message):
                 await message.channel.send(f"Thread already exists: {link_title}")
         else:
             await message.channel.send("The 'links' channel does not exist in the 'CURATED' category.")
-
-
 
 
 
@@ -257,6 +328,7 @@ async def organize(ctx):
                     if message.content.startswith('http'):
                         await process_link(message)
                         await ctx.send(f"Processed link: {message.content}")
+                        await message.delete()
 
     await ctx.send("Organize completed!")
 
