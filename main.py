@@ -49,48 +49,12 @@ else:
   access_token_secret = os.getenv('TWITTER_ACCESS_TOKEN_SECRET')
 
 
-def is_valid_url(url):
-    regex = re.compile(
-        r"^(?:http|ftp)s?://"  # http:// or https://
-        r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)|"  # domain...
-        r"localhost|"  # localhost...
-        r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|"  # ...or IPv4
-        r"\[?[A-F0-9]*:[A-F0-9:]+\]?)|"  # ...or IPv6
-        r"(?:[^\s:/?#\.]+\.)*"  # ...or domain name
-        r"(?:[^\s:/?#\.[\]]+\.?)?"  # ...or subdomain
-        r"(?:/[^\s?#]+)?"
-        r"(?:\?[^\s#]+)?"
-        r"(?:#[^\s]+)?$",
-        re.IGNORECASE
-    )
-    return re.match(regex, url) is not None
-
 def format_metadata(metadata):
     metadata_text = ""
     for key, value in metadata.items():
         metadata_text += f"{key}: {value}\n"
     return metadata_text
-    response = openai.Completion.create(
-        engine="text-davinci-003",
-        prompt=prompt,
-        max_tokens=100
-    )
-    channel_name = response.choices[0].text.strip()
-    return channel_name
-
-def extract_ogp_metadata(html_content):
-    soup = BeautifulSoup(html_content, 'html.parser')
-    # Extract OGP metadata tags
-    ogp_metadata = {}
-    ogp_tags = soup.find_all('meta', attrs={'property': lambda p: p.startswith('og:')})
-    for tag in ogp_tags:
-        property_name = tag['property'][3:]  # Remove the 'og:' prefix
-        content = tag.get('content')
-        if property_name and content:
-            ogp_metadata[property_name] = content
-    return ogp_metadata
   
-
 async def fetch_webpage(url):
     try:
         parsed_url = urllib.parse.urlparse(url)
@@ -104,13 +68,29 @@ async def fetch_webpage(url):
                 if response.status == 200:
                     if "twitter.com" in response.url.host:  # Check if the URL is from Twitter
                         # Fetch card metadata from Twitter
-                        webpage_content = await response.text()
-                        card_metadata = await fetch_twitter_card_metadata(url)
-                        return webpage_content, card_metadata
+                        metadata = await fetch_twitter_card_metadata(url)
+                        link_text = format_metadata(metadata)
+                        summary = summarize_with_gpt3(link_text)
+                        link_title = make_title_with_gpt(link_text)
+                        if not link_title:
+                            link_title = "Untitled"  
+                        if len(link_title) > 100:
+                            link_title = link_title[:100]  
+
+                        return link_title, link_text, summary
                     else:
                         webpage_content = await response.text()
+                        soup = BeautifulSoup(webpage_content, 'html.parser')
+                        link_title = soup.title.string if soup.title else message.content
                         metadata = response.headers  # Pass the response headers as metadata
-                        return webpage_content, metadata
+                        link_text = format_metadata(metadata)
+                        if not link_title:
+                            link_title = "Untitled"  
+                        if len(link_title) > 100:
+                            link_title = link_title[:100] 
+                        summary = metadata.get('description', 'No description available.')
+                        return link_title, link_text, summary
+                      
                 else:
                     print(f"Failed to fetch webpage: {response.status} {response.reason}")
                     return None, None
@@ -149,8 +129,8 @@ async def fetch_twitter_card_metadata(url):
         if 'data' in tweet:
             tweet = tweet['data']
             card_metadata = {
-                "title": tweet.get("text", ""),
-                "creator": tweet.get("author_id", ""),
+                "id": tweet.get("id", ""),
+                "text": tweet.get("text", ""),  # Use the tweet text as the description
             }
             print("Extracted card metadata:", card_metadata)
             return card_metadata
@@ -162,13 +142,24 @@ async def fetch_twitter_card_metadata(url):
         return {}
 
 
-
+def make_title_with_gpt(link_text):
+    time.sleep(1)  # Sleep for 1 second
+    max_context_length = 2000
+    prompt_length = max_context_length - 500
+    prompt = f"{link_text[:prompt_length]}\n\nCreate a title based on the text provided:"
+    response = openai.Completion.create(
+        engine="text-davinci-003",
+        prompt=prompt,
+        max_tokens=100
+    )
+    link_title = response.choices[0].text.strip()
+    return link_title
 
 def summarize_with_gpt3(text):
     max_context_length = 7000
     prompt_length = max_context_length - 500
     time.sleep(1)  # Sleep for 1 second
-    prompt = f"{text[:prompt_length]}\n\nSummarize the above content:"
+    prompt = f"{text[:prompt_length]}\n\nSummarize the above content between 2 to 7 setences:"
     response = openai.Completion.create(
         engine="text-davinci-003",
         prompt=prompt,
@@ -177,86 +168,24 @@ def summarize_with_gpt3(text):
     summary = response.choices[0].text.strip()
     return summary
  
-def extract_metadata(url, webpage_content):
-    metadata = {}
-    soup = BeautifulSoup(webpage_content, 'html.parser')
-
-    # Get title
-    title_tag = soup.find('meta', attrs={'property': 'og:title'})
-    if title_tag:
-        metadata['title'] = title_tag['content']
-
-    # Get description
-    description_tag = soup.find('meta', attrs={'property': 'og:description'})
-    if description_tag:
-        metadata['description'] = description_tag['content']
-
-    # Get image
-    image_tag = soup.find('meta', attrs={'property': 'og:image'})
-    if image_tag:
-        metadata['image'] = image_tag['content']
-
-    # Get keywords
-    keywords_tag = soup.find('meta', attrs={'name': 'keywords'})
-    if keywords_tag:
-        metadata['keywords'] = keywords_tag['content'].split(',')
-
-    return metadata
-
-
-def has_metadata(message):
-    return "Title:" in message.content and "Description:" in message.content and "Keywords:" in message.content
-
-def extract_keywords_from_text(text):
-    stop_words = ['the', 'is', 'and', 'a', 'an', 'in']
-    words = text.lower().split()
-    keywords = [word for word in words if word not in stop_words]
-    return keywords[:3]  
 
 
 async def process_link(message):
     # Fetch webpage
-    webpage_content, metadata = await fetch_webpage(message.content)
-
-    if webpage_content is not None and metadata is not None:
-        soup = BeautifulSoup(webpage_content, 'html.parser')
-        # Get the webpage title
-        link_title = soup.title.string if soup.title else message.content
-        if not link_title:
-            link_title = "Untitled"  # Set a default title if it's empty
-        if len(link_title) > 100:
-            link_title = link_title[:100]  # Truncate the title if it exceeds 100 characters
-
-        # Extract metadata
-        metadata = extract_metadata(message.content, webpage_content)
-        metadata_text = format_metadata(metadata)
-        # Summarize the article with GPT-3.5
-        summary = summarize_with_gpt3(soup.get_text())
-
-        category = discord.utils.get(message.guild.categories, name='CURATED')
-        if not category:
-            await message.channel.send("The 'CURATED' category does not exist.")
-            return
-
-        links_channel = discord.utils.get(category.channels, name='links')
-        if links_channel:
-            existing_threads = [thread for thread in links_channel.threads if thread.name == link_title]
-            if not existing_threads:
-                existing_links = [link async for link in links_channel.history() if link.author == client.user and link.content.startswith(link_title)]
-                await asyncio.sleep(1)  # Delay to respect rate limits
-                if not existing_links:
-                    thread_name = link_title
-                    thread = await links_channel.create_thread(name=thread_name, auto_archive_duration=60)
-                    # Send the summary and metadata to the thread
-                    await thread.send(f"{link_title} - {summary}\n{metadata_text}")
-                    await message.channel.send(f"Added: {link_title} - {summary}\n{metadata_text}")
-                else:
-                    await message.channel.send(f"Link already exists: {link_title}")
-            else:
-                await message.channel.send(f"Thread already exists: {link_title}")
-        else:
-            await message.channel.send("The 'links' channel does not exist in the 'CURATED' category.")
-
+    link_title, link_text, summary = await fetch_webpage(message.content)
+    # Summarize the article with GPT-3.5
+    category = discord.utils.get(message.guild.categories, name='CURATED')
+    links_channel = discord.utils.get(category.channels, name='links')
+    if links_channel:
+      existing_threads = [thread for thread in links_channel.threads if thread.name == link_title]
+      if not existing_threads:
+          existing_links = [link async for link in links_channel.history() if link.author == client.user and link.content.startswith(link_title)]
+          await asyncio.sleep(1)  # Delay to respect rate limits
+          if not existing_links:
+              thread = await links_channel.create_thread(name=link_title, auto_archive_duration=60)
+              # Send the summary and metadata to the thread
+              await thread.send(f"{link_title} - {link_text}\n{summary}\n{message.content}")
+                
 
 
 
