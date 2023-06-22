@@ -146,7 +146,7 @@ def extract_keywords_from_text(text):
     return keywords[:3]  
 
 
-async def process_link(message, category):
+async def process_link(message):
     # Fetch webpage
     webpage_content, metadata = await fetch_webpage(message.content)
 
@@ -159,6 +159,11 @@ async def process_link(message, category):
         metadata_text = format_metadata(metadata)
         # Summarize the article with GPT-3.5
         summary = summarize_with_gpt3(soup.get_text())
+
+        category = discord.utils.get(message.guild.categories, name='CURATED')
+        if not category:
+            await message.channel.send("The 'CURATED' category does not exist.")
+            return
 
         links_channel = discord.utils.get(category.channels, name='links')
         if links_channel:
@@ -176,6 +181,9 @@ async def process_link(message, category):
                     await message.channel.send(f"Link already exists: {link_title}")
             else:
                 await message.channel.send(f"Thread already exists: {link_title}")
+        else:
+            await message.channel.send("The 'links' channel does not exist in the 'CURATED' category.")
+
 
 
 
@@ -207,7 +215,7 @@ async def on_message(message):
 
         category = discord.utils.get(message.guild.categories, name='CURATED')
         if category:
-            await process_link(message, category)
+            await process_link(message)
         else:
             await message.channel.send("The 'CURATED' category does not exist.")
 
@@ -232,6 +240,10 @@ async def organize(ctx):
 
         await ctx.send(f"Processing category '{category.name}'...")
 
+        links_channel = discord.utils.get(category.channels, name='links')
+        if not links_channel:
+            links_channel = await category.create_text_channel('links')
+        
         for channel in category.channels:
             if isinstance(channel, discord.TextChannel):
                 if not channel.permissions_for(ctx.guild.me).manage_messages:
@@ -243,10 +255,11 @@ async def organize(ctx):
                 before_message = None  # Initialize the before_message variable
                 async for message in channel.history(limit=None, before=before_message):
                     if message.content.startswith('http'):
-                        await process_link(message, category)
+                        await process_link(message)
                         await ctx.send(f"Processed link: {message.content}")
 
     await ctx.send("Organize completed!")
+
 
 
 @client.command(name='removedupes')
@@ -254,35 +267,31 @@ async def organize(ctx):
 async def removedupes(ctx):
     await ctx.send("Removing duplicate links...")
 
-    # Fetch the current channel
-    channel = ctx.channel
+    message_history = []
+    async for message in ctx.channel.history(limit=None):
+        message_history.append(message)
 
-    # Fetch messages in the channel with pagination
-    messages = []
-    async for message in channel.history(limit=None):
-        messages.append(message)
-        if len(messages) >= 100:  # Adjust the batch size as needed
-            break
-
-    # Track encountered links
+    unique_messages = []
     encountered_links = set()
+    
+    for message in message_history:
+        if message.content.startswith('http') and message.content not in encountered_links:
+            unique_messages.append(message)
+            encountered_links.add(message.content)
 
-    # Iterate through messages in reverse order
-    for message in reversed(messages):
-        # Check if the message contains a link
-        if message.content.startswith('http'):
-            link = message.content.strip()
-            # Check if the link has been encountered before
-            if link in encountered_links:
-                # Delete the message
-                await message.delete()
-            else:
-                encountered_links.add(link)
+    deleted_count = 0
+    for message in message_history:
+        if message not in unique_messages:
+            await message.delete()
+            deleted_count += 1
+            await asyncio.sleep(1)  # Add a small delay after deleting a message to avoid rate limits
 
-        # Rate limit to avoid hitting Discord's API rate limits
-        await asyncio.sleep(2)  # Adjust the sleep duration as needed
+    await ctx.send(f"Duplicate links removed! Total messages deleted: {deleted_count}")
 
-    await ctx.send("Duplicate links removed!")
+
+
+
+
 
 
 
